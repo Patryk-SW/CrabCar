@@ -1,0 +1,349 @@
+#include <Bluepad32.h>
+#include <ESP32Servo.h>
+//przypisanie pinów do konkretnych elementów
+#define serwoA1 25
+#define serwoB1 32
+#define serwoA2 22
+#define serwoB2 23
+#define silnikA1PWM 26
+#define silnikB1PWM 33
+#define silnikA2PWM 18
+#define silnikB2PWM 19
+#define LsilnikA1 14    //IN1
+#define RsilnikA1 27    //IN2
+#define LsilnikB1 12    //IN3
+#define RsilnikB1 13    //IN4
+#define LsilnikA2 15    //IN1
+#define RsilnikA2 2     //IN2
+#define LsilnikB2 4     //IN3
+#define RsilnikB2 0     //IN4
+
+class Motor{
+    private:
+        int PinForward;
+        int PinReverse;
+        int PinPWM;
+    public:
+    Motor(int inPinForward,int inPinReverse,int inPinPWM){
+            // Konstruktor klasy Motor – przypisuje piny sterujące kierunkiem i prędkością
+        PinForward=inPinForward;
+        PinReverse=inPinReverse;
+        PinPWM=inPinPWM;
+    }
+    void Forward(int Speed){
+        // Uruchamia silnik w przód z podaną prędkością PWM
+        if(Speed>0){
+            digitalWrite(PinForward,HIGH);   // Włączenie kierunku do przodu
+            digitalWrite(PinReverse,LOW);    // Wyłączenie kierunku wstecznego
+            analogWrite(PinPWM,Speed);       // Ustawienie prędkości PWM
+        }else{
+            digitalWrite(PinForward,LOW);    // Zatrzymanie silnika
+            digitalWrite(PinReverse,LOW);
+        }
+    }
+    void Backward(int Speed){
+        // Uruchamia silnik do tyłu z podaną prędkością PWM
+        if(Speed>0){
+            digitalWrite(PinForward,LOW);    // Wyłączenie przodu
+            digitalWrite(PinReverse,HIGH);   // Włączenie kierunku do tyłu
+            analogWrite(PinPWM,Speed);       // Ustawienie prędkości PWM
+        }else{
+            digitalWrite(PinForward,LOW);    // Zatrzymanie silnika
+            digitalWrite(PinReverse,HIGH);
+        }
+    }
+    void Stop(){
+        // Zatrzymuje silnik – wyłącza oba kierunki
+        digitalWrite(PinForward,LOW);
+        digitalWrite(PinReverse,LOW);
+    }
+};
+//Zainicjowanie obiektów serwomechanizmów, oraz zainicjowanie: zmiennej do "martwej strefy" i do trybu kraba.
+Motor MotorFL(LsilnikA1,RsilnikA1,silnikA1PWM);
+Motor MotorFR(LsilnikB1,RsilnikB1,silnikB1PWM);
+Motor MotorBL(LsilnikA2,RsilnikA2,silnikA2PWM);
+Motor MotorBR(LsilnikB2,RsilnikB2,silnikB2PWM);
+
+int deadZone=100;
+bool krabMODE=false;
+
+Servo myservoA1;
+Servo myservoB1;
+Servo myservoA2;
+Servo myservoB2; // obiekty serwa
+
+ControllerPtr myControllers[BP32_MAX_GAMEPADS];
+
+// Funkcja to połączen
+void onConnectedController(ControllerPtr ctl) {
+    // Funkcja wywoływana po podłączeniu kontrolera – ustawia callback na rozłączenie
+    bool foundEmptySlot = false;
+    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+        if (myControllers[i] == nullptr) {
+            Serial.printf("CALLBACK: Controller is connected, index=%d\n", i);
+            // Additionally, you can get certain gamepad properties like:
+            // Model, VID, PID, BTAddr, flags, etc.
+            ControllerProperties properties = ctl->getProperties();
+            Serial.printf("Controller model: %s, VID=0x%04x, PID=0x%04x\n", ctl->getModelName().c_str(), properties.vendor_id,
+                           properties.product_id);
+            myControllers[i] = ctl;
+            foundEmptySlot = true;
+            break;
+        }
+    }
+    if (!foundEmptySlot) {
+        Serial.println("CALLBACK: Controller connected, but could not found empty slot");
+    }
+}
+
+void onDisconnectedController(ControllerPtr ctl) {
+    // Funkcja wywoływana po rozłączeniu kontrolera – wypisuje informację na port szeregowy
+    bool foundController = false;
+
+    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+        if (myControllers[i] == ctl) {
+            Serial.printf("CALLBACK: Controller disconnected from index=%d\n", i);
+            myControllers[i] = nullptr;
+            foundController = true;
+            break;
+        }
+    }
+
+    if (!foundController) {
+        Serial.println("CALLBACK: Controller disconnected, but not found in myControllers");
+    }
+}
+
+
+void dumpGamepad(ControllerPtr ctl) {
+    Serial.printf(
+        "idx=%d, dpad: 0x%02x, buttons: 0x%04x, axis L: %4d, %4d, axis R: %4d, %4d, brake: %4d, throttle: %4d, "
+        "misc: 0x%02x, gyro x:%6d y:%6d z:%6d, accel x:%6d y:%6d z:%6d\n",
+        ctl->index(),        // Controller Index
+        ctl->dpad(),         // D-pad
+        ctl->buttons(),      // bitmask of pressed buttons
+        ctl->axisX(),        // (-511 - 512) left X Axis
+        ctl->axisY(),        // (-511 - 512) left Y axis
+        ctl->axisRX(),       // (-511 - 512) right X axis
+        ctl->axisRY(),       // (-511 - 512) right Y axis
+        ctl->brake(),        // (0 - 1023): brake button
+        ctl->throttle(),     // (0 - 1023): throttle (AKA gas) button
+        ctl->miscButtons(),  // bitmask of pressed "misc" buttons
+        ctl->gyroX(),        // Gyro X
+        ctl->gyroY(),        // Gyro Y
+        ctl->gyroZ(),        // Gyro Z
+        ctl->accelX(),       // Accelerometer X
+        ctl->accelY(),       // Accelerometer Y
+        ctl->accelZ()        // Accelerometer Z
+    );
+}
+
+void processGamepad(ControllerPtr ctl) {
+ // Funkcja przetwarzająca dane z gamepada – ustawia zmienne globalne na podstawie pozycji gałek i przycisków
+if(krabMODE==false){
+int skret = ctl->axisX();  // Odczytaj pozycję gałki X
+if (ctl->y()){
+    skret = ctl->axisX();
+    deadZone=skret;
+}
+const int maxInput = 512;  // Maksymalne wychylenie
+const int minAngle = 0;   // Minimalny kąt skrętu
+const int centerAngleA1 = 67; // Środkowa pozycja A1
+const int centerAngleB2 = 137;// Środkowa pozycja B2
+const int centerAngleA2 = 0;// Środkowa pozycja A2
+const int centerAngleB1 = 128;// Środkowa pozycja B1
+const int maxAngle = 180;  // Maksymalny kąt skrętu
+
+//A1 67 kat serwa //obliczone 68 // skret:-6
+//B2 137 kat serwa //obliczone 135 // skret: 137 //Dane z kalibracji
+//A2 124 kat serwa //obliczone 122  // skret: 264
+//B1 139 kat serwa //obliczone 137 // skret: -187
+
+// Sprawdź, czy wartość wychodzi poza martwą strefę
+if (abs(skret) > 100) {
+    // Oblicz wartość proporcjonalną do siły skrętu
+    float normalized = (float)(skret) / maxInput; // w zakresie -1.0 do 1.0
+    int angleOffsetA1 = (int)(normalized * (90 - centerAngleA1)); 
+    int angleOffsetB1 = (int)(normalized * (170 - centerAngleB1));
+    int targetAngleA1 = centerAngleA1 + angleOffsetA1;
+    int targetAngleB1 = centerAngleB1 + angleOffsetB1;
+
+    myservoA1.write(targetAngleA1);
+    myservoB1.write(targetAngleB1);
+
+    // Debug
+    Serial.print("Skret: ");
+    Serial.print(skret);
+    Serial.print("  KatA1: ");
+    Serial.println(targetAngleA1);
+    Serial.print("  KatB1: ");
+    Serial.println(targetAngleB1);
+    Serial.print(myservoA1.read());
+    Serial.print(": Obrót serwaA1\n");
+    Serial.print(myservoB1.read());
+    Serial.print(": Obrót serwaB1\n");
+    Serial.print(myservoA2.read());
+    Serial.print(": Obrót serwaA2\n");
+    Serial.print(myservoB2.read());
+    Serial.print(": Obrót serwaB2\n");
+}
+else {
+    // W martwej strefie - ustaw serwa na środek
+    myservoA2.write(centerAngleA2);
+    myservoB2.write(centerAngleB2);
+    myservoA1.write(centerAngleA1);
+    myservoB1.write(centerAngleB1);
+}
+    
+    if(ctl->throttle()!=0){ //Jazda w przód
+    int gaz = ctl->throttle();
+    int mapGaz = map(gaz, 0, 1023, 0, 120);
+    Serial.printf("JAZDA PRZÓD: %d\n",mapGaz);
+
+    MotorFL.Forward(mapGaz);
+    MotorFR.Forward(mapGaz);
+    MotorBL.Forward(mapGaz);
+    MotorBR.Forward(mapGaz);
+    }
+
+    else if (ctl->brake()!=0){ //Jazda do tyłu
+    int wsteczny=ctl->brake();
+    int mapWST = map(wsteczny, 0, 1023, 0, 120);
+    Serial.printf("JAZDA TYŁ: %d\n",mapWST);
+    MotorFL.Backward(mapWST);
+    MotorFR.Backward(mapWST);
+    MotorBL.Backward(mapWST);
+    MotorBR.Backward(mapWST);
+    }
+ 
+    else{ //Swobodne hamowanie
+    MotorFL.Stop();
+    MotorFR.Stop();
+    MotorBL.Stop();
+    MotorBR.Stop();
+}
+    
+
+    if (ctl->x()) { //TRYB KRABA WŁĄCZONY
+        ctl->playDualRumble(0,250,0x80,0x40);
+        Serial.println("KRABMODE: PROCESSING");
+        myservoA1.write(164);
+        delay(35);
+        myservoB1.write(148);        
+        delay(35);
+        myservoA2.write(1);
+        delay(35);
+        myservoB2.write(35);
+        delay(500);
+        Serial.println("KRABMODE: PROCESSING");
+        myservoA1.write(169);
+        delay(35);
+        myservoB1.write(43);        
+        delay(35);
+        myservoA2.write(101);
+        delay(35);
+        myservoB2.write(32);
+        ctl->playDualRumble(0,250,0x80,0x40);
+        krabMODE=true;
+        delay(500);
+        Serial.println("KRABMODE: ON");
+    }}
+
+if (krabMODE==true){
+    if (ctl->b()) {//TRYB KRABA WYŁĄCZONY
+        ctl->playDualRumble(0,250,0x80,0x40);
+        Serial.println("KRABMODE: PROCESSING");
+        myservoA1.write(169);
+        delay(35);
+        myservoB1.write(43);
+        delay(35);
+        myservoA2.write(101);
+        delay(35);
+        myservoB2.write(32);
+        delay(35);
+        Serial.println("KRABMODE: PROCESSING");
+        myservoA1.write(164);
+        delay(35);
+        myservoB1.write(148);
+        delay(35);
+        myservoA2.write(1);
+        delay(35);
+        myservoB2.write(35);
+        ctl->playDualRumble(0,250,0x80,0x40);
+        krabMODE=false;
+        delay(500);
+        Serial.println("KRABMODE: OFF");
+    }
+//////////////////TRYB KRABA
+    
+    if((ctl->dpad()==0x04)){///////////////////JAZDA W PRAWO
+    
+    MotorFL.Forward(80);
+    MotorFR.Backward(80);
+    MotorBL.Forward(80);
+    MotorBR.Backward(80);
+    
+}
+    else if((ctl->dpad()==0x08)){///////////////////JAZDA W LEWO
+    
+    MotorFL.Backward(80);
+    MotorFR.Forward(80);
+    MotorBL.Backward(80);
+    MotorBR.Forward(80);
+}
+    else {
+    MotorFL.Stop();
+    MotorFR.Stop();
+    MotorBL.Stop();
+    MotorBR.Stop();
+    }}
+        dumpGamepad(ctl); //Odczytywanie danych z kontrolera do testów
+}
+
+void processControllers() { //Ustalenie połączenia i typu urządzenia sterującego
+    for (auto myController : myControllers) {
+        if (myController && myController->isConnected() && myController->hasData()) {
+            if (myController->isGamepad()) {
+                processGamepad(myController);
+            }else {
+                Serial.println("Unsupported controller");
+            }
+        }
+    }
+}
+void setup() {
+    myservoA1.setPeriodHertz(50);
+    myservoB1.setPeriodHertz(50);
+    myservoA2.setPeriodHertz(50);
+    myservoB2.setPeriodHertz(50); 
+    myservoA1.attach(serwoA1, 500, 2400);
+    myservoB1.attach(serwoB1, 500, 2400);
+    myservoA2.attach(serwoA2, 500, 2400);
+    myservoB2.attach(serwoB2, 500, 2400);  
+    pinMode(LsilnikA1,OUTPUT);
+    pinMode(RsilnikA1,OUTPUT);
+    pinMode(LsilnikB1,OUTPUT);
+    pinMode(RsilnikB1,OUTPUT);
+    pinMode(LsilnikA2,OUTPUT);
+    pinMode(RsilnikA2,OUTPUT);
+    pinMode(LsilnikB2,OUTPUT);
+    pinMode(RsilnikB2,OUTPUT);
+    pinMode(silnikA1PWM,OUTPUT);
+    pinMode(silnikB1PWM,OUTPUT);
+    pinMode(silnikA2PWM,OUTPUT);
+    pinMode(silnikB2PWM,OUTPUT);
+    Serial.begin(115200);
+    Serial.printf("Firmware: %s\n", BP32.firmwareVersion());
+    const uint8_t* addr = BP32.localBdAddress();
+    Serial.printf("BD Addr: %2X:%2X:%2X:%2X:%2X:%2X\n", addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+    BP32.setup(&onConnectedController, &onDisconnectedController);
+    BP32.forgetBluetoothKeys();
+    BP32.enableVirtualDevice(false);
+}
+
+void loop() {
+    bool dataUpdated = BP32.update();
+    if (dataUpdated)                    //Aktualizacja danych z kontrolera
+        processControllers();
+    delay(150);
+}
